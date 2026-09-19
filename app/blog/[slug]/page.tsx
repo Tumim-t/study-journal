@@ -1,7 +1,10 @@
 import type { Metadata } from 'next'
 import { notFound } from 'next/navigation'
 import { BlogPost } from '@/components/blog-post'
-import { getPostBySlug, POSTS } from '@/lib/posts'
+import { getPublishedPostBySlug } from '@/lib/posts-supabase'
+import { getPublicPostImageUrl } from '@/lib/post-images'
+
+export const dynamic = 'force-dynamic'
 
 type BlogPostPageProps = {
   params: Promise<{
@@ -9,15 +12,9 @@ type BlogPostPageProps = {
   }>
 }
 
-export function generateStaticParams() {
-  return POSTS.map((post) => ({
-    slug: post.slug,
-  }))
-}
-
 export async function generateMetadata({ params }: BlogPostPageProps): Promise<Metadata> {
   const { slug } = await params
-  const post = getPostBySlug(slug)
+  const post = await getPublishedPostBySlug(slug)
 
   if (!post) {
     return {
@@ -33,11 +30,16 @@ export async function generateMetadata({ params }: BlogPostPageProps): Promise<M
 
 export default async function BlogPostPage({ params }: BlogPostPageProps) {
   const { slug } = await params
-  const post = getPostBySlug(slug)
+  const post = await getPublishedPostBySlug(slug)
 
   if (!post) {
     notFound()
   }
 
-  return <BlogPost post={post} />
+  const publicPost = {
+    ...post,
+    image: await getPublicPostImageUrl(post.image),
+  }
+
+  return <BlogPost post={publicPost} />
 }

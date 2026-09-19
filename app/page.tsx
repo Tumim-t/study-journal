@@ -1,9 +1,15 @@
 import { PageShell } from '@/components/page-shell'
 import { HomeHero } from '@/components/home-hero'
 import { PostCard } from '@/components/post-card'
-import { CATEGORIES, POSTS } from '@/lib/posts'
+import { CATEGORIES } from '@/lib/posts'
+import { getPublishedPosts } from '@/lib/posts-supabase'
+import { withPublicPostImages } from '@/lib/post-images'
 
-export default function HomePage() {
+export const dynamic = 'force-dynamic'
+
+export default async function HomePage() {
+  const posts = await withPublicPostImages(await getPublishedPosts())
+
   return (
     <PageShell>
       <HomeHero />
@@ -36,7 +42,7 @@ export default function HomePage() {
         </div>
 
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {POSTS.map((post, i) => (
+          {posts.map((post, i) => (
             <PostCard key={post.slug} post={post} priority={i < 3} />
           ))}
         </div>

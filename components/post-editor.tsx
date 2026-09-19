@@ -1,6 +1,7 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import Image from 'next/image'
 import {
   Bold,
@@ -14,7 +15,18 @@ import {
   Send,
   X,
 } from 'lucide-react'
-import { CATEGORIES, type Category } from '@/lib/posts'
+import {
+  ArticleSection,
+  CATEGORIES,
+  type Category,
+  type Post,
+} from '@/lib/posts'
+import {
+  getOwnedPostBySlug,
+  serializePostContent,
+  type OwnedPost,
+} from '@/lib/posts-supabase'
+import { supabase } from '@/lib/supabase'
 import { Input } from '@/components/ui/field'
 import { cn } from '@/lib/utils'
 
@@ -36,48 +48,473 @@ const toolbarButtons = [
   { icon: List, label: 'List' },
 ]
 
-export function PostEditor() {
+type UploadedCover = {
+  path: string
+  isNew: boolean
+}
+
+function createSlug(title: string) {
+  const slug = title
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return slug || 'untitled-post'
+}
+
+function createStoredContent(title: string, category: Category, body: string) {
+  const paragraphs = body
+    .trim()
+    .split(/\n\s*\n/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+
+  const firstParagraph = paragraphs[0] || body.trim()
+  const excerpt =
+    firstParagraph.length > 160 ? `${firstParagraph.slice(0, 157)}…` : firstParagraph
+  const wordCount = body.trim().split(/\s+/).filter(Boolean).length
+  const readingTime = `${Math.max(1, Math.ceil(wordCount / 200))} min read`
+  const now = new Date()
+  const sections: ArticleSection[] = [
+    {
+      heading: 'Article Body',
+      paragraphs,
+    },
+  ]
+  const post: Post = {
+    slug: '',
+    title,
+    excerpt,
+    date: now.toLocaleDateString('en-US', {
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    }),
+    publishedAt: now.toISOString().slice(0, 10),
+    category,
+    image: '/placeholder.svg',
+    readingTime,
+    sections,
+  }
+
+  return serializePostContent(post)
+}
+
+async function insertPost({
+  title,
+  category,
+  body,
+  status,
+  authorId,
+  coverImage,
+}: {
+  title: string
+  category: Category
+  body: string
+  status: 'draft' | 'published'
+  authorId: string
+  coverImage: string | null
+}) {
+  const baseSlug = createSlug(title)
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const slug = attempt === 0 ? baseSlug : `${baseSlug}-${attempt + 1}`
+    const { error } = await supabase.from('posts').insert({
+      title,
+      slug,
+      category,
+      content: createStoredContent(title, category, body),
+      author_id: authorId,
+      status,
+      cover_image: coverImage,
+    })
+
+    if (!error) {
+      return slug
+    }
+
+    if (error.code !== '23505') {
+      throw new Error(error.message)
+    }
+  }
+
+  throw new Error('Could not create a unique slug for this post.')
+}
+
+async function updatePost({
+  id,
+  baseSlug,
+  title,
+  category,
+  body,
+  status,
+  authorId,
+  coverImage,
+}: {
+  id: string
+  baseSlug: string
+  title: string
+  category: Category
+  body: string
+  status: 'draft' | 'published'
+  authorId: string
+  coverImage: string | null
+}) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const slug = attempt === 0 ? baseSlug : `${baseSlug}-${attempt + 1}`
+    const { error } = await supabase
+      .from('posts')
+      .update({
+        title,
+        slug,
+        category,
+        content: createStoredContent(title, category, body),
+        status,
+        cover_image: coverImage,
+      })
+      .eq('id', id)
+      .eq('author_id', authorId)
+
+    if (!error) {
+      return slug
+    }
+
+    if (error.code !== '23505') {
+      throw new Error(error.message)
+    }
+  }
+
+  throw new Error('Could not create a unique slug for this post.')
+}
+
+function isOwnerImagePath(path: string, userId: string) {
+  return path.startsWith(`${userId}/`)
+}
+
+export function PostEditor({ postSlug }: { postSlug?: string }) {
+  const router = useRouter()
+  const fileRef = useRef<HTMLInputElement>(null)
   const [title, setTitle] = useState('Building a Restorative Evening Study Ritual')
   const [category, setCategory] = useState<Category>('Habits')
   const [body, setBody] = useState(SAMPLE_BODY)
-  const [cover, setCover] = useState<string | null>(null)
-  const fileRef = useRef<HTMLInputElement>(null)
+  const [coverPreviewUrl, setCoverPreviewUrl] = useState<string | null>(null)
+  const [coverFile, setCoverFile] = useState<File | null>(null)
+  const [coverPath, setCoverPath] = useState<string | null>(null)
+  const [uploadedCover, setUploadedCover] = useState<UploadedCover | null>(null)
+  const [editingPost, setEditingPost] = useState<OwnedPost | null>(null)
+  const [isUploading, setIsUploading] = useState(false)
+  const [currentUser, setCurrentUser] = useState<{ id: string } | null>(null)
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true)
+  const [isLoadingPost, setIsLoadingPost] = useState(Boolean(postSlug))
+  const [isSaving, setIsSaving] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
+  const [successMessage, setSuccessMessage] = useState('')
+
+  async function getCoverPreviewUrl(path: string | null) {
+    if (!path) return null
+    if (path.startsWith('/') || path.startsWith('http://') || path.startsWith('https://')) {
+      return path
+    }
+
+    const { data } = await supabase.storage.from('blog-images').createSignedUrl(path, 60 * 60)
+    return data?.signedUrl || null
+  }
+
+  useEffect(() => {
+    let isActive = true
+
+    async function load() {
+      const {
+        data: { user },
+        error,
+      } = await supabase.auth.getUser()
+
+      if (!isActive) return
+
+      if (error || !user) {
+        setCurrentUser(null)
+        setErrorMessage('Log in to save, edit, or publish a post.')
+        setIsCheckingAuth(false)
+        setIsLoadingPost(false)
+        return
+      }
+
+      setCurrentUser({ id: user.id })
+
+      if (postSlug) {
+        const post = await getOwnedPostBySlug(postSlug, user.id)
+        if (!isActive) return
+
+        if (!post) {
+          setErrorMessage('This post was not found or does not belong to your account.')
+          setIsLoadingPost(false)
+          return
+        }
+
+        setEditingPost(post)
+        setTitle(post.title)
+        setCategory(post.category)
+        setBody(post.body)
+        setCoverPath(post.cover_image)
+        setCoverPreviewUrl(await getCoverPreviewUrl(post.cover_image))
+        setIsLoadingPost(false)
+      }
+
+      setIsCheckingAuth(false)
+    }
+
+    void load()
+
+    return () => {
+      isActive = false
+    }
+  }, [postSlug])
+
+  async function getAuthenticatedUser() {
+    const {
+      data: { user },
+      error,
+    } = await supabase.auth.getUser()
+
+    if (error || !user) {
+      setErrorMessage('Log in to save, edit, or publish a post.')
+      setCurrentUser(null)
+      return null
+    }
+
+    setCurrentUser({ id: user.id })
+    return { id: user.id }
+  }
+
+  async function uploadCover(userId: string): Promise<UploadedCover | null> {
+    if (!coverFile) return null
+    if (uploadedCover) return uploadedCover
+
+    setIsUploading(true)
+    const fileExtension = coverFile.name.includes('.')
+      ? coverFile.name.split('.').pop()?.toLowerCase()
+      : undefined
+    const extension =
+      fileExtension && /^[a-z0-9]+$/.test(fileExtension) ? `.${fileExtension}` : ''
+    const originalName = coverFile.name
+      .replace(/\.[^.]+$/, '')
+      .replace(/[^a-zA-Z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80) || 'cover'
+
+    try {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const uniquePart =
+          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+        const filename = `${originalName}-${uniquePart}${extension}`
+        const path = `${userId}/${filename}`
+        const { error } = await supabase.storage.from('blog-images').upload(path, coverFile, {
+          contentType: coverFile.type || 'application/octet-stream',
+          upsert: false,
+        })
+
+        if (!error) {
+          const uploaded = { path, isNew: true }
+          setUploadedCover(uploaded)
+          setCoverPath(path)
+          return uploaded
+        }
+
+        if (error.statusCode !== '409') {
+          throw new Error(error.message)
+        }
+      }
+    } finally {
+      setIsUploading(false)
+    }
+
+    throw new Error('Could not create a unique storage path for the cover image.')
+  }
+
+  async function removeUploadedCover(path: string) {
+    await supabase.storage.from('blog-images').remove([path])
+  }
+
+  async function handleSubmit(status: 'draft' | 'published') {
+    if (isSaving || isCheckingAuth || isLoadingPost) return
+
+    const user = await getAuthenticatedUser()
+    if (!user) return
+
+    const trimmedTitle = title.trim()
+    const trimmedBody = body.trim()
+
+    if (!trimmedTitle) {
+      setErrorMessage('Enter an article title before saving.')
+      return
+    }
+
+    if (!trimmedBody) {
+      setErrorMessage('Enter article content before saving.')
+      return
+    }
+
+    setErrorMessage('')
+    setSuccessMessage('')
+    setIsSaving(true)
+
+    let newlyUploadedCover: UploadedCover | null = null
+
+    try {
+      newlyUploadedCover = await uploadCover(user.id)
+      const coverImage = newlyUploadedCover?.path ?? coverPath
+
+      if (editingPost) {
+        const baseSlug =
+          trimmedTitle === editingPost.title ? editingPost.slug : createSlug(trimmedTitle)
+        const slug = await updatePost({
+          id: editingPost.id,
+          baseSlug,
+          title: trimmedTitle,
+          category,
+          body: trimmedBody,
+          status,
+          authorId: user.id,
+          coverImage,
+        })
+
+        if (
+          newlyUploadedCover?.isNew &&
+          editingPost.cover_image &&
+          editingPost.cover_image !== newlyUploadedCover.path &&
+          isOwnerImagePath(editingPost.cover_image, user.id)
+        ) {
+          await removeUploadedCover(editingPost.cover_image).catch(() => undefined)
+        }
+
+        if (status === 'published') {
+          router.push(`/blog/${slug}`)
+          return
+        }
+
+        setSuccessMessage('Post updated and saved as a draft.')
+      } else {
+        const slug = await insertPost({
+          title: trimmedTitle,
+          category,
+          body: trimmedBody,
+          status,
+          authorId: user.id,
+          coverImage,
+        })
+
+        if (status === 'published') {
+          router.push(`/blog/${slug}`)
+          return
+        }
+
+        setSuccessMessage(`Draft saved. Your post slug is ${slug}.`)
+      }
+    } catch (error) {
+      if (newlyUploadedCover?.isNew && newlyUploadedCover.path) {
+        await removeUploadedCover(newlyUploadedCover.path).catch(() => undefined)
+        setUploadedCover(null)
+        setCoverPath(editingPost?.cover_image ?? null)
+      }
+      setErrorMessage(error instanceof Error ? error.message : 'Could not save this post.')
+    } finally {
+      setIsSaving(false)
+    }
+  }
 
   function handleFile(file?: File) {
     if (!file) return
-    const url = URL.createObjectURL(file)
-    setCover(url)
+
+    if (coverPreviewUrl) {
+      URL.revokeObjectURL(coverPreviewUrl)
+    }
+
+    setCoverFile(file)
+    setUploadedCover(null)
+    setCoverPath(editingPost?.cover_image ?? null)
+    setCoverPreviewUrl(URL.createObjectURL(file))
+    setErrorMessage('')
   }
+
+  async function handleRemoveCover() {
+    if (coverPreviewUrl) {
+      URL.revokeObjectURL(coverPreviewUrl)
+    }
+
+    setCoverFile(null)
+    setUploadedCover(null)
+    setCoverPath(editingPost?.cover_image ?? null)
+    setCoverPreviewUrl(await getCoverPreviewUrl(editingPost?.cover_image ?? null))
+  }
+
+  const isEditing = Boolean(editingPost)
 
   return (
     <div className="mx-auto max-w-4xl px-5 py-12 sm:px-6 lg:px-8">
-      {/* Header row */}
       <div className="flex flex-col gap-5 border-b border-border/70 pb-8 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="font-heading text-4xl font-bold tracking-tight text-foreground">
-            Write a Post
+            {isEditing ? 'Edit Post' : 'Write a Post'}
           </h1>
           <p className="mt-2 text-muted-foreground">
-            Share your study methods, reflections, or campus routines.
+            {isEditing
+              ? 'Update your study notes, reflections, or campus routines.'
+              : 'Share your study methods, reflections, or campus routines.'}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <button className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-primary/50">
+          <button
+            type="button"
+            onClick={() => void handleSubmit('draft')}
+            disabled={isCheckingAuth || isLoadingPost || isSaving || isUploading || !currentUser}
+            className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
             <Bookmark className="size-4" />
-            Save Draft
+            {isUploading ? 'Uploading…' : isSaving ? 'Saving…' : 'Save Draft'}
           </button>
           <button className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-2.5 text-sm font-medium text-foreground transition-colors hover:border-primary/50">
             <Eye className="size-4" />
             Preview
           </button>
-          <button className="inline-flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90">
+          <button
+            type="button"
+            onClick={() => void handleSubmit('published')}
+            disabled={isCheckingAuth || isLoadingPost || isSaving || isUploading || !currentUser}
+            className="inline-flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          >
             <Send className="size-4" />
-            Publish
+            {isUploading ? 'Uploading…' : isSaving ? 'Publishing…' : 'Publish'}
           </button>
         </div>
       </div>
 
-      {/* Title */}
+      {(isCheckingAuth || isLoadingPost || isUploading || errorMessage || successMessage) && (
+        <p
+          className={`mt-6 rounded-xl border px-4 py-3 text-sm ${
+            errorMessage
+              ? 'border-destructive/30 bg-destructive/10 text-destructive'
+              : successMessage
+                ? 'border-primary/30 bg-primary/10 text-primary'
+                : 'border-border bg-card text-muted-foreground'
+          }`}
+          aria-live="polite"
+        >
+          {isCheckingAuth
+            ? 'Checking your session…'
+            : isLoadingPost
+              ? 'Loading your post…'
+              : isUploading
+                ? 'Uploading cover image…'
+                : errorMessage
+                  ? errorMessage
+                  : successMessage}
+        </p>
+      )}
+
       <div className="mt-8">
         <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Article Title
@@ -90,7 +527,6 @@ export function PostEditor() {
         />
       </div>
 
-      {/* Category */}
       <div className="mt-10">
         <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Select Category
@@ -114,7 +550,6 @@ export function PostEditor() {
         </div>
       </div>
 
-      {/* Cover */}
       <div className="mt-10">
         <div className="flex items-center justify-between">
           <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -131,11 +566,11 @@ export function PostEditor() {
           onChange={(e) => handleFile(e.target.files?.[0])}
         />
 
-        {cover ? (
+        {coverPreviewUrl ? (
           <div className="relative mt-3 aspect-[21/9] overflow-hidden rounded-2xl border border-border">
-            <Image src={cover || '/placeholder.svg'} alt="Cover preview" fill className="object-cover" />
+            <Image src={coverPreviewUrl} alt="Cover preview" fill className="object-cover" />
             <button
-              onClick={() => setCover(null)}
+              onClick={() => void handleRemoveCover()}
               className="absolute right-3 top-3 inline-flex size-9 items-center justify-center rounded-full bg-background/90 text-foreground shadow-sm hover:bg-background"
               aria-label="Remove cover photo"
             >
@@ -159,7 +594,6 @@ export function PostEditor() {
         )}
       </div>
 
-      {/* Body */}
       <div className="mt-10">
         <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Article Body Content

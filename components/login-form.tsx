@@ -1,17 +1,48 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { ArrowRight, Zap, BookOpen } from 'lucide-react'
 import Link from 'next/link'
 import { Input, Label } from '@/components/ui/field'
+import { supabase } from '@/lib/supabase'
 
 export function LoginForm() {
+  const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [errorMessage, setErrorMessage] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
 
   function fillDemo() {
     setEmail('elena.vance@campus.edu')
     setPassword('studyjournal')
+    setErrorMessage('')
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setErrorMessage('')
+
+    if (!email || !password) {
+      setErrorMessage('Enter your email address and password.')
+      return
+    }
+
+    setIsLoading(true)
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    })
+
+    if (error) {
+      setErrorMessage(error.message)
+      setIsLoading(false)
+      return
+    }
+
+    router.replace('/write')
   }
 
   return (
@@ -28,19 +59,26 @@ export function LoginForm() {
         </p>
       </div>
 
-      <form
-        onSubmit={(e) => e.preventDefault()}
-        className="mt-8 space-y-5"
-      >
+      <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+        {errorMessage && (
+          <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert">
+            {errorMessage}
+          </p>
+        )}
+
         <div>
           <Label htmlFor="email">Email address</Label>
           <Input
             id="email"
             type="email"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(event) => {
+              setEmail(event.target.value)
+              setErrorMessage('')
+            }}
             placeholder="you@campus.edu"
             autoComplete="email"
+            disabled={isLoading}
           />
         </div>
 
@@ -57,24 +95,30 @@ export function LoginForm() {
             id="password"
             type="password"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(event) => {
+              setPassword(event.target.value)
+              setErrorMessage('')
+            }}
             placeholder="••••••••••"
             autoComplete="current-password"
+            disabled={isLoading}
           />
         </div>
 
         <button
           type="submit"
-          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-foreground px-6 py-3.5 text-[15px] font-semibold text-background transition-opacity hover:opacity-90"
+          disabled={isLoading}
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-foreground px-6 py-3.5 text-[15px] font-semibold text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          Log In
+          {isLoading ? 'Logging in…' : 'Log In'}
           <ArrowRight className="size-4" />
         </button>
 
         <button
           type="button"
           onClick={fillDemo}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-card px-6 py-3.5 text-[15px] font-medium text-foreground transition-colors hover:border-primary/50 hover:text-primary"
+          disabled={isLoading}
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-card px-6 py-3.5 text-[15px] font-medium text-foreground transition-colors hover:border-primary/50 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
         >
           <Zap className="size-4 text-primary" />
           Demo Student Login (Elena Vance)

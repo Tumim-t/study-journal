@@ -34,7 +34,7 @@ export function SiteFooter() {
           <Link href="/" aria-label="Gallery" className="hover:text-foreground">
             <Camera className="size-5" strokeWidth={1.75} />
           </Link>
-          <Link href="/" aria-label="Saved posts" className="hover:text-foreground">
+          <Link href="/posts" aria-label="Saved posts" className="hover:text-foreground">
             <Pin className="size-5" strokeWidth={1.75} />
           </Link>
           <Link href="/write" aria-label="Write a post" className="hover:text-foreground">
